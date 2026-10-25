@@ -1,0 +1,10 @@
+{
+  "display_name": "Termux Shell Bridge",
+  "loading_order": 10,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "mxrfx",
+  "version": "1.0.0",
+  "auto_update": false,
+  "minimum_client_version": "1.19.0"
+}
