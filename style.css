@@ -1,0 +1,28 @@
+#termux-shell-bridge-panel {
+    margin: 8px 0;
+}
+
+#termux-shell-bridge-panel label {
+    display: block;
+    margin-top: 8px;
+}
+
+#termux-shell-bridge-panel input {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#termux-shell-bridge-panel button {
+    margin: 8px 4px 4px 0;
+}
+
+#tsb-status {
+    margin-top: 8px;
+    color: #8bc34a;
+}
+
+#tsb-result {
+    white-space: pre-wrap;
+    max-height: 240px;
+    overflow: auto;
+}
