@@ -1,92 +1,113 @@
 (function () {
     'use strict';
 
-    const SETTINGS_KEY = 'termux-shell-bridge-settings';
-    const APPROVAL_KEY = 'termux-shell-bridge-approved';
-    let registered = false;
-    let lastChatKey = '';
+    const KEY = 'termux-shell-bridge-settings';
+    const APPROVAL = 'termux-shell-bridge-approved';
 
-    function getContext() {
+    let registered = false;
+    let lastChat = '';
+
+    function ctx() {
         return window.SillyTavern?.getContext?.() || null;
     }
 
-    function getSettings() {
+    function settings() {
         try {
-            return JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+            return JSON.parse(localStorage.getItem(KEY) || '{}');
         } catch {
             return {};
         }
     }
 
-    function saveSettings(url, token) {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+    function saveSettings(url, token, mode) {
+        localStorage.setItem(KEY, JSON.stringify({
             url: url.replace(/\/+$/, ''),
-            token
+            token,
+            mode
         }));
     }
 
-    function getChatKey() {
-        const ctx = getContext();
-        if (!ctx) return 'unknown';
+    function config() {
+        const value = settings();
 
-        return String(
-            ctx.chatId ||
-            ctx.chat?.[0]?.chat_id ||
-            `${ctx.characterId || ''}:${ctx.groupId || ''}`
-        );
+        return {
+            url: (value.url || 'http://127.0.0.1:8765')
+                .replace(/\/+$/, ''),
+            token: value.token || '',
+            mode: value.mode || 'ask'
+        };
     }
 
-    function refreshSession() {
-        const key = getChatKey();
+    function chatKey() {
+        const value = ctx();
 
-        if (lastChatKey && key !== lastChatKey) {
-            sessionStorage.removeItem(APPROVAL_KEY);
+        if (!value) return 'unknown';
+
+        return [
+            value.characterId ?? '',
+            value.groupId ?? '',
+            value.chatId ?? '',
+            Array.isArray(value.chat)
+                ? value.chat.length
+                : ''
+        ].join(':');
+    }
+
+    function refreshChat() {
+        const key = chatKey();
+
+        if (lastChat && key !== lastChat) {
+            sessionStorage.removeItem(APPROVAL);
         }
 
-        lastChatKey = key;
+        lastChat = key;
     }
 
-    function isApproved() {
-        refreshSession();
-        return sessionStorage.getItem(APPROVAL_KEY) === '1';
+    function approved() {
+        refreshChat();
+        return sessionStorage.getItem(APPROVAL) === '1';
     }
 
-    function askApproval(command) {
-        if (isApproved()) return true;
+    function ask(command) {
+        const value = config();
 
-        const accepted = confirm(
+        if (value.mode === 'trust' && approved()) {
+            return true;
+        }
+
+        const ok = window.confirm(
             'LLM 请求执行 Termux Bash 命令：\n\n' +
             command +
             '\n\n' +
-            '确认后，本次聊天会话内的后续命令将自动执行。'
+            '允许后，本次聊天会话内后续命令将自动执行。'
         );
 
-        if (accepted) {
-            sessionStorage.setItem(APPROVAL_KEY, '1');
+        if (ok) {
+            sessionStorage.setItem(APPROVAL, '1');
+            setStatus('当前聊天：自动执行已授权');
         }
 
-        return accepted;
+        return ok;
     }
 
-    async function bridgeRequest(path, options = {}) {
-        const cfg = getSettings();
-        const url = (cfg.url || 'http://127.0.0.1:8765')
-            .replace(/\/+$/, '');
+    async function request(path, options = {}) {
+        const value = config();
 
-        if (!cfg.token) {
-            throw new Error('尚未设置 Termux Bridge Token');
+        if (!value.token) {
+            throw new Error('未设置 Bridge Token');
         }
 
-        const response = await fetch(url + path, {
+        const response = await fetch(value.url + path, {
             ...options,
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${cfg.token}`,
+                Authorization: `Bearer ${value.token}`,
                 ...(options.headers || {})
             }
         });
 
         const text = await response.text();
+
         let data;
 
         try {
@@ -102,27 +123,34 @@
         return data;
     }
 
-    function result(data) {
-        return JSON.stringify(data, null, 2);
+    function stringify(value) {
+        return JSON.stringify(value, null, 2);
     }
 
-    async function runShell(args) {
-        const command = String(args.command || '');
+    function denied(message) {
+        return stringify({
+            ok: false,
+            cancelled: true,
+            error: message
+        });
+    }
 
-        if (!command.trim()) {
-            return result({ ok: false, error: '命令为空' });
-        }
+    async function shell(args) {
+        const command = String(args.command || '').trim();
 
-        if (!askApproval(command)) {
-            return result({
+        if (!command) {
+            return stringify({
                 ok: false,
-                cancelled: true,
-                error: '用户拒绝执行命令'
+                error: '命令为空'
             });
         }
 
+        if (!ask(command)) {
+            return denied('用户拒绝执行命令');
+        }
+
         try {
-            return result(await bridgeRequest('/shell', {
+            return stringify(await request('/shell', {
                 method: 'POST',
                 body: JSON.stringify({
                     command,
@@ -131,7 +159,7 @@
                 })
             }));
         } catch (error) {
-            return result({
+            return stringify({
                 ok: false,
                 error: error.message
             });
@@ -139,22 +167,21 @@
     }
 
     async function startJob(args) {
-        const command = String(args.command || '');
+        const command = String(args.command || '').trim();
 
-        if (!command.trim()) {
-            return result({ ok: false, error: '命令为空' });
-        }
-
-        if (!askApproval(`启动后台任务：\n${command}`)) {
-            return result({
+        if (!command) {
+            return stringify({
                 ok: false,
-                cancelled: true,
-                error: '用户拒绝启动后台任务'
+                error: '命令为空'
             });
         }
 
+        if (!ask(`启动后台任务：\n${command}`)) {
+            return denied('用户拒绝启动后台任务');
+        }
+
         try {
-            return result(await bridgeRequest('/jobs/start', {
+            return stringify(await request('/jobs/start', {
                 method: 'POST',
                 body: JSON.stringify({
                     command,
@@ -162,24 +189,40 @@
                 })
             }));
         } catch (error) {
-            return result({
+            return stringify({
                 ok: false,
                 error: error.message
             });
         }
     }
 
-    async function getJobStatus(args) {
-        const id = encodeURIComponent(String(args.job_id || ''));
+    async function listJobs() {
+        try {
+            return stringify(await request('/jobs'));
+        } catch (error) {
+            return stringify({
+                ok: false,
+                error: error.message
+            });
+        }
+    }
+
+    async function jobStatus(args) {
+        const id = String(args.job_id || '').trim();
 
         if (!id) {
-            return result({ ok: false, error: '缺少任务 ID' });
+            return stringify({
+                ok: false,
+                error: '缺少任务 ID'
+            });
         }
 
         try {
-            return result(await bridgeRequest(`/jobs/${id}`));
+            return stringify(await request(
+                `/jobs/${encodeURIComponent(id)}`
+            ));
         } catch (error) {
-            return result({
+            return stringify({
                 ok: false,
                 error: error.message
             });
@@ -187,84 +230,115 @@
     }
 
     async function stopJob(args) {
-        const jobId = String(args.job_id || '');
+        const id = String(args.job_id || '').trim();
 
-        if (!jobId) {
-            return result({ ok: false, error: '缺少任务 ID' });
-        }
-
-        if (!askApproval(`停止后台任务：${jobId}`)) {
-            return result({
+        if (!id) {
+            return stringify({
                 ok: false,
-                cancelled: true,
-                error: '用户拒绝停止任务'
+                error: '缺少任务 ID'
             });
         }
 
+        if (!ask(`停止后台任务：${id}`)) {
+            return denied('用户拒绝停止任务');
+        }
+
         try {
-            return result(await bridgeRequest(
-                `/jobs/${encodeURIComponent(jobId)}/stop`,
+            return stringify(await request(
+                `/jobs/${encodeURIComponent(id)}/stop`,
                 {
                     method: 'POST',
                     body: '{}'
                 }
             ));
         } catch (error) {
-            return result({
+            return stringify({
                 ok: false,
                 error: error.message
             });
         }
     }
 
-    function registerTools() {
-        const ctx = getContext();
-
-        if (!ctx || typeof ctx.registerFunctionTool !== 'function') {
-            console.warn(
-                '[Termux Shell Bridge] Function Calling API 不可用'
-            );
-            return;
+    async function stopAllJobs() {
+        if (!ask('终止所有后台任务')) {
+            return denied('用户拒绝终止全部任务');
         }
 
-        if (registered) return;
+        try {
+            return stringify(await request('/jobs/stop-all', {
+                method: 'POST',
+                body: '{}'
+            }));
+        } catch (error) {
+            return stringify({
+                ok: false,
+                error: error.message
+            });
+        }
+    }
 
-        ctx.registerFunctionTool({
+    function registerTool(definition) {
+        const value = ctx();
+
+        if (
+            value &&
+            typeof value.registerFunctionTool === 'function'
+        ) {
+            value.registerFunctionTool(definition);
+            return true;
+        }
+
+        return false;
+    }
+
+    function registerTools() {
+        if (registered) return true;
+
+        const value = ctx();
+
+        if (
+            !value ||
+            typeof value.registerFunctionTool !== 'function'
+        ) {
+            return false;
+        }
+
+        registerTool({
             name: 'termux_shell',
             displayName: 'Termux Shell',
             description:
                 '在 Android 手机上的 Termux 中执行任意 Bash 命令。' +
-                '可用于查看文件、运行脚本、安装软件、联网、编译和管理进程。',
+                '可以读写文件、联网、安装软件、运行脚本、编译和管理进程。',
             parameters: {
                 type: 'object',
                 properties: {
                     command: {
                         type: 'string',
-                        description: '要执行的完整 Bash 命令'
+                        description: '完整的 Bash 命令'
                     },
                     cwd: {
                         type: 'string',
-                        description: '可选的工作目录'
+                        description: '可选工作目录'
                     },
                     timeout: {
                         type: 'integer',
-                        description: '超时时间，单位毫秒，默认 30000'
+                        description: '超时时间，单位毫秒'
                     }
                 },
                 required: ['command']
             },
-            action: runShell,
+            action: shell,
             formatMessage: ({ command }) =>
-                `执行 Termux：${String(command).slice(0, 100)}`,
+                `Termux Shell：${String(command).slice(0, 100)}`,
             shouldRegister: () => true,
             stealth: false
         });
 
-        ctx.registerFunctionTool({
+        registerTool({
             name: 'termux_start_job',
             displayName: 'Start Termux Job',
             description:
-                '在 Termux 中启动后台 Bash 任务，适合下载、编译、服务器和长时间脚本。',
+                '启动 Termux 后台 Bash 任务。最多同时运行 3 个任务。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -274,7 +348,7 @@
                     },
                     cwd: {
                         type: 'string',
-                        description: '可选的工作目录'
+                        description: '可选工作目录'
                     }
                 },
                 required: ['command']
@@ -286,10 +360,24 @@
             stealth: false
         });
 
-        ctx.registerFunctionTool({
+        registerTool({
+            name: 'termux_jobs',
+            displayName: 'List Termux Jobs',
+            description: '列出所有后台任务及其日志。',
+            parameters: {
+                type: 'object',
+                properties: {}
+            },
+            action: listJobs,
+            formatMessage: () => '查询 Termux 后台任务',
+            shouldRegister: () => true,
+            stealth: false
+        });
+
+        registerTool({
             name: 'termux_job_status',
             displayName: 'Termux Job Status',
-            description: '查询后台任务的状态和日志路径。',
+            description: '查看指定后台任务的状态和日志内容。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -300,14 +388,14 @@
                 },
                 required: ['job_id']
             },
-            action: getJobStatus,
+            action: jobStatus,
             formatMessage: ({ job_id }) =>
-                `查询后台任务：${job_id}`,
+                `查询任务：${job_id}`,
             shouldRegister: () => true,
             stealth: false
         });
 
-        ctx.registerFunctionTool({
+        registerTool({
             name: 'termux_stop_job',
             displayName: 'Stop Termux Job',
             description: '停止指定的后台任务。',
@@ -323,13 +411,37 @@
             },
             action: stopJob,
             formatMessage: ({ job_id }) =>
-                `停止后台任务：${job_id}`,
+                `停止任务：${job_id}`,
+            shouldRegister: () => true,
+            stealth: false
+        });
+
+        registerTool({
+            name: 'termux_stop_all_jobs',
+            displayName: 'Stop All Termux Jobs',
+            description: '终止全部正在运行的 Termux 后台任务。',
+            parameters: {
+                type: 'object',
+                properties: {}
+            },
+            action: stopAllJobs,
+            formatMessage: () => '终止全部后台任务',
             shouldRegister: () => true,
             stealth: false
         });
 
         registered = true;
+        setStatus('LLM Shell 工具已注册');
         console.log('[Termux Shell Bridge] 工具注册成功');
+        return true;
+    }
+
+    function setStatus(text) {
+        const element = document.getElementById('tsb-status');
+
+        if (element) {
+            element.textContent = text;
+        }
     }
 
     function createPanel() {
@@ -344,7 +456,7 @@
 
         if (!target) return false;
 
-        const s = getSettings();
+        const value = settings();
         const panel = document.createElement('div');
 
         panel.id = 'termux-shell-bridge-panel';
@@ -357,17 +469,26 @@
             <div class="inline-drawer-content">
                 <label>Bridge 地址</label>
                 <input id="tsb-url" class="text_pole"
-                    value="${s.url || 'http://127.0.0.1:8765'}">
+                    value="${value.url || 'http://127.0.0.1:8765'}">
 
                 <label>Token</label>
                 <input id="tsb-token" class="text_pole"
-                    type="password" value="${s.token || ''}">
+                    type="password" value="${value.token || ''}">
+
+                <label>执行模式</label>
+                <select id="tsb-mode" class="text_pole">
+                    <option value="ask">每次命令确认</option>
+                    <option value="trust">当前聊天自动执行</option>
+                </select>
 
                 <button id="tsb-test" class="menu_button">
                     测试连接
                 </button>
                 <button id="tsb-revoke" class="menu_button">
                     撤销当前聊天授权
+                </button>
+                <button id="tsb-stop-all" class="menu_button">
+                    终止全部后台任务
                 </button>
 
                 <div id="tsb-status">正在初始化</div>
@@ -377,15 +498,18 @@
 
         target.appendChild(panel);
 
-        const urlInput = document.getElementById('tsb-url');
-        const tokenInput = document.getElementById('tsb-token');
-        const status = document.getElementById('tsb-status');
+        const url = document.getElementById('tsb-url');
+        const token = document.getElementById('tsb-token');
+        const mode = document.getElementById('tsb-mode');
         const output = document.getElementById('tsb-result');
+
+        mode.value = value.mode || 'ask';
 
         function save() {
             saveSettings(
-                urlInput.value.trim(),
-                tokenInput.value.trim()
+                url.value.trim(),
+                token.value.trim(),
+                mode.value
             );
         }
 
@@ -393,36 +517,54 @@
             save();
 
             try {
-                output.textContent = result(
-                    await bridgeRequest('/health')
+                output.textContent = stringify(
+                    await request('/health')
                 );
             } catch (error) {
-                output.textContent = `连接失败：${error.message}`;
+                output.textContent =
+                    `连接失败：${error.message}`;
             }
         };
 
         document.getElementById('tsb-revoke').onclick = () => {
-            sessionStorage.removeItem(APPROVAL_KEY);
-            status.textContent = '已撤销当前聊天授权';
+            sessionStorage.removeItem(APPROVAL);
+            setStatus('当前聊天授权已撤销');
         };
 
-        status.textContent = 'Termux Shell Bridge 已加载';
+        document.getElementById('tsb-stop-all').onclick = async () => {
+            if (!ask('终止全部后台任务')) return;
+
+            try {
+                output.textContent = stringify(
+                    await request('/jobs/stop-all', {
+                        method: 'POST',
+                        body: '{}'
+                    })
+                );
+            } catch (error) {
+                output.textContent =
+                    `操作失败：${error.message}`;
+            }
+        };
+
         return true;
     }
 
     function init() {
+        refreshChat();
         createPanel();
         registerTools();
-        refreshSession();
     }
-
-    setInterval(() => {
-        createPanel();
-        registerTools();
-        refreshSession();
-    }, 1000);
 
     window.addEventListener('load', init);
     document.addEventListener('DOMContentLoaded', init);
+
+    setInterval(() => {
+        refreshChat();
+        createPanel();
+        registerTools();
+    }, 1000);
+
     setTimeout(init, 1000);
+    setTimeout(init, 3000);
 })();
